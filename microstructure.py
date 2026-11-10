@@ -30,27 +30,32 @@ def _load(ticker: str) -> pd.DataFrame:
     return df.sort_values("ts", kind="stable").reset_index(drop=True)
 
 
+def _at(df: pd.DataFrame, hhmm: str) -> datetime:
+    """'HH:MM'을 데이터셋 날짜의 시각으로 바꾼다."""
+    try:
+        return datetime.combine(df["ts"].iloc[0].date(), time.fromisoformat(hhmm))
+    except ValueError as e:
+        raise ValueError(f"시각은 'HH:MM' 형식이어야 합니다. (입력: {hhmm})") from e
+
+
+def session_end(ticker: str) -> datetime:
+    """데이터셋의 마지막 이벤트 시각. 가상 데이터를 실시간처럼 다루기 위해 이 시각을 '현재'로 본다."""
+    return _load(ticker)["ts"].iloc[-1].to_pydatetime()
+
+
 def _slice(df: pd.DataFrame, start: str | None, end: str | None) -> pd.DataFrame:
     """'HH:MM' 형식의 시각으로 장중 구간을 자른다."""
-    day = df["ts"].iloc[0].date()
-
-    def at(hhmm: str) -> datetime:
-        try:
-            return datetime.combine(day, time.fromisoformat(hhmm))
-        except ValueError as e:
-            raise ValueError(f"시각은 'HH:MM' 형식이어야 합니다. (입력: {hhmm})") from e
-
     if start:
-        df = df[df["ts"] >= at(start)]
+        df = df[df["ts"] >= _at(df, start)]
     if end:
-        df = df[df["ts"] < at(end)]
+        df = df[df["ts"] < _at(df, end)]
     if df.empty:
         raise ValueError("해당 구간에 데이터가 없습니다.")
     return df
 
 
-def _replay_snapshots(df_all: pd.DataFrame, sample_times: list[pd.Timestamp]) -> list[dict]:
-    """처음부터 이벤트를 다시 재생해 각 시점의 호가 상태(최우선 호가, 상위 5단계 잔량)를 구한다."""
+def _replay_snapshots(df_all: pd.DataFrame, sample_times: list, depth: int | None = DEPTH) -> list[dict]:
+    """처음부터 이벤트를 다시 재생해 각 시점의 호가 상태(가격별 잔량)를 구한다. depth=None이면 전체 단계."""
     levels = {"bid": defaultdict(int), "ask": defaultdict(int)}
     snaps = []
     rows = df_all[["ts", "type", "side", "price", "qty"]].itertuples(index=False)
@@ -63,8 +68,8 @@ def _replay_snapshots(df_all: pd.DataFrame, sample_times: list[pd.Timestamp]) ->
             if lv[pending.price] <= 0:
                 del lv[pending.price]
             pending = next(rows, None)
-        bids = sorted(levels["bid"].items(), reverse=True)[:DEPTH]
-        asks = sorted(levels["ask"].items())[:DEPTH]
+        bids = sorted(levels["bid"].items(), reverse=True)[:depth]
+        asks = sorted(levels["ask"].items())[:depth]
         snaps.append({"bids": bids, "asks": asks})
     return snaps
 
@@ -194,4 +199,62 @@ def surveillance_scan(
         "rule": f"주문 수량 중앙값의 {large_multiple:g}배 이상 주문이 {max_lifetime_sec:g}초 안에 체결 없이 취소, "
                 f"같은 방향 {min_orders}건 이상",
         "alerts": alerts,
+    }
+
+
+def tca_estimate(ticker: str, side: str, qty: int, at: str) -> dict:
+    """at 시각에 qty주를 시장가로 주문했다면 드는 거래 비용을 추정한다 (사전 TCA).
+
+    그 시각의 호가를 재구성한 뒤, 최우선 호가부터 차례로 체결시켜 평균 체결가를 구한다.
+    - arrival_mid: 주문 시점의 중간가 ((최우선 매수 + 최우선 매도) / 2). 비용 계산의 기준.
+    - slippage_bps: 평균 체결가가 중간가에서 불리하게 벗어난 정도 (1bp = 0.01%).
+    - spread_cost_bps: 그중 스프레드 절반 때문에 생기는 비용.
+    - impact_bps: 나머지. 주문이 커서 여러 호가 단계를 먹으며 생기는 충격 비용.
+    """
+    if side not in ("buy", "sell"):
+        raise ValueError("side는 'buy' 또는 'sell'이어야 합니다.")
+    if qty < 1:
+        raise ValueError("qty는 1 이상이어야 합니다.")
+
+    df = _load(ticker)
+    t = _at(df, at)
+    if not (df["ts"].iloc[0] < t <= df["ts"].iloc[-1]):
+        raise ValueError("주문 시각이 데이터셋 장중 범위를 벗어났습니다.")
+    snap = _replay_snapshots(df, [t], depth=None)[0]
+    if not snap["bids"] or not snap["asks"]:
+        raise ValueError("해당 시각에 호가가 비어 있어 추정할 수 없습니다.")
+
+    best_bid, best_ask = snap["bids"][0][0], snap["asks"][0][0]
+    mid = (best_bid + best_ask) / 2
+    book = snap["asks"] if side == "buy" else snap["bids"]
+
+    remaining, cost, levels = qty, 0, 0
+    for price, available in book:
+        if remaining == 0:
+            break
+        fill = min(remaining, available)
+        cost += fill * price
+        remaining -= fill
+        levels += 1
+    filled = qty - remaining
+    if filled == 0:
+        raise ValueError("체결 가능한 잔량이 없습니다.")
+
+    avg = cost / filled
+    sign = 1 if side == "buy" else -1
+    slippage = sign * (avg - mid) / mid * 10_000
+    spread_cost = (best_ask - best_bid) / 2 / mid * 10_000
+    return {
+        "ticker": ticker.upper(),
+        "at": at,
+        "side": side,
+        "qty": qty,
+        "filled": filled,
+        "unfilled": remaining,
+        "levels_consumed": levels,
+        "arrival_mid": round(mid, 1),
+        "avg_fill_price": round(avg, 1),
+        "slippage_bps": round(slippage, 2),
+        "spread_cost_bps": round(spread_cost, 2),
+        "impact_bps": round(slippage - spread_cost, 2),
     }
