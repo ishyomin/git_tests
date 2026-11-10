@@ -9,6 +9,8 @@
 - trade:  체결 (시장가 주문이 반대편 최우선 호가와 체결)
 
 테스트·평가를 위해 일부러 '스푸핑' 패턴을 섞는다.
+또 오탐을 만들 수 있는 '정상 대량 주문'(기관이 큰 주문을 1~3건 냈다가 가격 조정 등으로 곧 취소하거나
+그대로 두는 경우)도 섞어서, 탐지 기준을 너무 낮추면 오탐이 생기고 너무 높이면 놓치도록 했다.
 스푸핑: 실제로 체결할 생각이 없는 대량 주문을 한쪽에 깔아 가격을 움직인 뒤, 몇 초 안에 모두 취소하는 행위.
 어디에 섞었는지는 vault/labels.json에 정답으로 따로 저장한다.
 
@@ -33,6 +35,7 @@ def simulate(
     start: str = "2026-11-10 09:00:00",
     minutes: int = 120,
     n_spoofs: int = 8,
+    n_decoys: int = 25,
     seed: int = 42,
 ) -> tuple[pd.DataFrame, list[dict]]:
     rng = random.Random(seed)
@@ -94,6 +97,14 @@ def simulate(
     spoof_times.sort()
     labels: list[dict] = []
 
+    # 정상 대량 주문 시각 (스푸핑과 60초 이상 떨어지게)
+    decoy_times: list[datetime] = []
+    while len(decoy_times) < n_decoys:
+        cand = t0 + timedelta(seconds=rng.uniform(60, minutes * 60 - 60))
+        if all(abs((cand - s).total_seconds()) > 60 for s in spoof_times + decoy_times):
+            decoy_times.append(cand)
+    decoy_times.sort()
+
     # 초기 호가 깔기
     for i in range(1, 6):
         for _ in range(3):
@@ -125,6 +136,26 @@ def simulate(
                     t += timedelta(milliseconds=rng.randint(20, 120))
                     cancel(t, oid)
             labels.append({"start": s_start.isoformat(), "end": t.isoformat(), "side": side})
+            ts = t
+            continue
+
+        # 정상 대량 주문: 1~3건을 내고, 절반 이상은 1~8초 안에 취소, 나머지는 그대로 둔다
+        if decoy_times and ts >= decoy_times[0]:
+            decoy_times.pop(0)
+            side = rng.choice(["bid", "ask"])
+            bb, ba = best("bid") or mid - TICK, best("ask") or mid + TICK
+            t = ts
+            ids = []
+            for k in range(rng.randint(1, 3)):
+                t += timedelta(milliseconds=rng.randint(100, 1500))
+                price = bb - k * TICK if side == "bid" else ba + k * TICK
+                ids.append(add(t, side, price, rng.randint(100, 700)))
+            if rng.random() < 0.6:
+                t += timedelta(seconds=rng.uniform(1, 8))
+                for oid in ids:
+                    if oid in book:
+                        t += timedelta(milliseconds=rng.randint(50, 400))
+                        cancel(t, oid)
             ts = t
             continue
 
