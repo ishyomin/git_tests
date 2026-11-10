@@ -3,8 +3,10 @@
 주식 시세를 조회하고 간단한 지표로 흐름을 분석하는 **MCP(Model Context Protocol) 서버**입니다.
 Claude 데스크톱에 연결하면 Claude가 질문에 맞는 도구를 골라 호출하고, 실제 시세 데이터를 바탕으로 답합니다.
 
-> 금융 공모전에서 기획한 "실시간 주식 데이터를 LLM이 자동 분석하는 시스템" 아이디어를
+> 코스콤 공모전에서 기획한 **"MCP 기반 Compute-to-Data 금융데이터 플랫폼"**을
 > 직접 동작하는 최소 버전으로 구현한 프로젝트입니다.
+> 틱·호가 원본은 규제·계약상 외부로 반출하기 어렵기 때문에, 원본은 서버 안(vault)에 두고
+> MCP 도구는 계산된 **파생 지표만** 반환합니다.
 
 ## 실행 예시
 
@@ -22,6 +24,29 @@ Claude 데스크톱에 연결하면 Claude가 질문에 맞는 도구를 골라 
 한국 종목은 6자리 코드(예: `005930`, 코스피 → 코스닥 순으로 조회), 미국 종목은 티커(예: `AAPL`)로 조회합니다.
 시세 데이터는 [yfinance](https://github.com/ranaroussi/yfinance)로 가져옵니다.
 
+### Compute-to-Data 도구 (틱·호가 데이터)
+
+| 도구 | 반환하는 파생값 |
+|---|---|
+| `list_datasets` | 데이터셋 목록과 제공 지표 (원본 경로·건수는 비공개) |
+| `market_microstructure` | 구간별 스프레드, 호가 불균형(OBI), 취소율, 메시지 수, 체결량 |
+| `surveillance_scan` | 스푸핑 의심 구간의 시각·방향·건수·총량 (주문 번호·가격 비공개) |
+
+```
+[vault: 원본 틱·호가 이벤트]  →  microstructure.py (내부 계산)  →  policy.py (반출 검사)  →  Claude
+       외부 반출 불가                 파생값만 생성                  위반 시 차단
+```
+
+**반출 정책** (`policy.py`)
+1. 집계 단위는 최소 60초. 더 짧으면 개별 주문이 드러납니다.
+2. 이벤트가 20건 미만인 구간은 값을 숨깁니다(`suppressed`).
+3. 주문 번호 등 개별 주문 식별 정보는 결과에 포함될 수 없습니다.
+4. 한 번에 200행을 넘겨 반환할 수 없습니다.
+
+**데이터**: 실제 KRX 틱 데이터는 정보이용계약이 필요하므로, `simulator.py`가 만든 **가상 데이터**를 사용합니다.
+평가를 위해 스푸핑 패턴(대량 주문을 깔았다가 2~5초 안에 모두 취소)을 일부러 섞고, 정답은 따로 저장해 탐지 결과와 비교합니다.
+현재 규칙으로 가상 데이터의 스푸핑 8건을 오탐 없이 모두 탐지합니다.
+
 ## 구조
 
 ```
@@ -29,7 +54,10 @@ server.py       MCP 서버. 도구를 등록하고 오류를 Claude가 읽을 �
 stock.py        시세 조회와 지표 계산 (MCP와 분리해 네트워크 없이 테스트 가능)
 call_log.py     모든 도구 호출을 logs/tool_calls.jsonl에 기록 (입력, 소요 시간, 성공 여부, 오류)
 log_report.py   호출 로그를 도구별 호출 수·오류율·평균 응답 시간으로 집계
-tests/          지표 계산과 로그 기록 테스트
+simulator.py    가상 틱·호가 이벤트 생성 (스푸핑 패턴 포함) → vault/
+microstructure.py  vault 원본으로 미시구조 지표와 스푸핑 의심 구간 계산
+policy.py       원본 반출 차단 규칙
+tests/          지표 계산, 로그 기록, 반출 정책, 탐지 정확도 테스트
 ```
 
 ### 호출 추적
@@ -50,6 +78,7 @@ get_price            2       50.0       612.5
 ```powershell
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python simulator.py
 .venv\Scripts\python -m pytest
 ```
 

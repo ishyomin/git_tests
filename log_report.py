@@ -45,9 +45,9 @@ def main() -> None:
         return
 
     print(f"전체 호출 {len(records)}건\n")
-    print(f"{'도구':<14}{'호출 수':>8}{'오류율(%)':>12}{'평균(ms)':>12}")
+    print(f"{'도구':<24}{'호출 수':>8}{'오류율(%)':>12}{'평균(ms)':>12}")
     for tool, s in summarize(records).items():
-        print(f"{tool:<14}{s['calls']:>8}{s['error_rate_pct']:>12}{s['avg_ms']:>12}")
+        print(f"{tool:<24}{s['calls']:>8}{s['error_rate_pct']:>12}{s['avg_ms']:>12}")
 
     errors = [r for r in records if r.get("status") == "error"][-5:]
     if errors:
