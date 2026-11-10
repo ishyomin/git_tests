@@ -1,7 +1,7 @@
 """도구 호출 기록(추적 로그).
 
 모든 도구 호출을 logs/tool_calls.jsonl에 한 줄씩 JSON으로 남긴다.
-- 언제(ts), 어떤 도구(tool)를, 어떤 입력(args)으로 호출했는지
+- 언제(ts), 어떤 등급(tier)이, 어떤 도구(tool)를, 어떤 입력(args)으로 호출했는지
 - 얼마나 걸렸는지(duration_ms), 성공했는지(status), 실패했다면 왜(error)
 
 stdio 방식 MCP 서버는 표준 출력을 통신에 쓰기 때문에, 로그는 반드시 파일로 남긴다.
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,7 @@ def logged(func):
         record = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "tool": func.__name__,
+            "tier": os.environ.get("STOCK_MCP_TIER", "enterprise"),
             "args": kwargs or list(args),
         }
         try:
