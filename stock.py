@@ -58,6 +58,47 @@ def summarize_price(ticker: str, df: pd.DataFrame) -> dict:
     return result
 
 
+def analyze_trend(ticker: str, df: pd.DataFrame) -> dict:
+    """이동평균, 변동성, 최대 낙폭으로 최근 흐름을 숫자로 요약한다.
+
+    - 이동평균(MA5, MA20): 최근 5일·20일 종가의 평균. 단기 평균이 장기 평균보다 위면 상승 추세로 본다.
+    - 변동성: 일별 수익률의 표준편차(%). 클수록 하루 등락이 크다는 뜻이다.
+    - 최대 낙폭(MDD): 기간 중 직전 고점 대비 가장 크게 떨어진 비율(%).
+    """
+    if len(df) < 20:
+        raise ValueError("추세 분석에는 최소 20거래일 데이터가 필요합니다.")
+
+    closes = df["Close"].astype(float)
+    last = float(closes.iloc[-1])
+    ma5 = float(closes.tail(5).mean())
+    ma20 = float(closes.tail(20).mean())
+
+    daily_returns = closes.pct_change().dropna()
+    volatility = float(daily_returns.std() * 100)
+
+    running_peak = closes.cummax()
+    max_drawdown = float(((closes - running_peak) / running_peak).min() * 100)
+
+    if ma5 > ma20 and last > ma5:
+        trend = "상승"
+    elif ma5 < ma20 and last < ma5:
+        trend = "하락"
+    else:
+        trend = "횡보"
+
+    return {
+        "ticker": ticker,
+        "date": df.index[-1].strftime("%Y-%m-%d"),
+        "close": round(last, 2),
+        "ma5": round(ma5, 2),
+        "ma20": round(ma20, 2),
+        "volatility_pct": round(volatility, 2),
+        "max_drawdown_pct": round(max_drawdown, 2),
+        "trend": trend,
+        "note": "단순 지표 기반 요약이며 투자 판단의 근거가 아닙니다.",
+    }
+
+
 def summarize_history(ticker: str, df: pd.DataFrame) -> dict:
     """기간 동안의 일별 종가 목록과 최고·최저·기간 수익률을 정리한다."""
     if df.empty:

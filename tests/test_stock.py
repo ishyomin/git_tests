@@ -48,6 +48,26 @@ def test_summarize_history():
     assert len(result["daily"]) == 3
 
 
+def test_analyze_uptrend():
+    result = stock.analyze_trend("TEST", make_df([100.0 + i for i in range(20)]))
+    assert result["trend"] == "상승"
+    assert result["ma5"] == 117.0
+    assert result["ma20"] == 109.5
+    assert result["max_drawdown_pct"] == 0.0
+
+
+def test_analyze_downtrend_drawdown():
+    result = stock.analyze_trend("TEST", make_df([200.0 - i * 5 for i in range(20)]))
+    assert result["trend"] == "하락"
+    # 고점 200에서 105까지 떨어졌으므로 낙폭은 -47.5%
+    assert result["max_drawdown_pct"] == -47.5
+
+
+def test_analyze_needs_20_days():
+    with pytest.raises(ValueError):
+        stock.analyze_trend("TEST", make_df([100.0] * 10))
+
+
 def test_empty_data_raises():
     with pytest.raises(ValueError):
         stock.summarize_price("TEST", make_df([]))
